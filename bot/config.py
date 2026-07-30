@@ -29,7 +29,7 @@ from pydantic_settings import (
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
-CONFIG_PATH_ENVIRONMENT_VARIABLE = "SOCIAL_BOT_CONFIG"
+CONFIG_PATH_ENVIRONMENT_VARIABLE = "STEALTH_BOT_CONFIG"
 
 NonEmptyString = Annotated[
     str,
@@ -141,7 +141,7 @@ class Settings(BaseSettings):
     accounts: AccountsSettings = Field(default_factory=AccountsSettings)
 
     model_config = SettingsConfigDict(
-        env_prefix="SOCIAL_BOT_",
+        env_prefix="STEALTH_BOT_",
         env_nested_delimiter="__",
         env_file=".env",
         env_file_encoding="utf-8",
@@ -217,7 +217,7 @@ class Settings(BaseSettings):
 def load_settings(config_path: str | Path | None = None) -> Settings:
     """Load JSON or YAML settings, then apply dotenv and environment overrides.
 
-    An explicit ``config_path`` takes precedence over ``SOCIAL_BOT_CONFIG``.
+    An explicit ``config_path`` takes precedence over ``STEALTH_BOT_CONFIG``.
     Relative configuration paths are interpreted from the current working
     directory. Relative browser data paths are interpreted from the selected
     configuration file's directory, or from the current working directory when

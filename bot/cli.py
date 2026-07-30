@@ -914,7 +914,7 @@ def root_callback(
         Path | None,
         typer.Option(
             "--config",
-            envvar="SOCIAL_BOT_CONFIG",
+            envvar="STEALTH_BOT_CONFIG",
             help="JSON or YAML configuration file.",
             dir_okay=False,
             readable=True,
