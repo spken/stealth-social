@@ -1,5 +1,5 @@
 {
-  "database_url": "sqlite:///data/social_bot.db",
+  "database_url": "sqlite:///data/stealth.db",
   "dry_run": true,
   "manual_approval": true,
   "browser": {
