@@ -69,12 +69,23 @@ class SocialActionRecord(Base):
     __table_args__ = (
         CheckConstraint("attempts >= 0", name="ck_social_actions_attempts_nonnegative"),
         CheckConstraint("max_attempts > 0", name="ck_social_actions_max_attempts_positive"),
+        CheckConstraint(
+            "(claim_owner IS NULL AND claim_expires_at IS NULL) OR "
+            "(claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL)",
+            name="ck_social_actions_claim_lease_complete",
+        ),
         Index(
             "ix_social_actions_due",
             "status",
             "scheduled_at",
             "retry_available_at",
             "claim_expires_at",
+        ),
+        Index(
+            "ix_social_actions_claim_recovery",
+            "status",
+            "claim_expires_at",
+            "external_dispatch_started_at",
         ),
         Index(
             "ix_social_actions_duplicate",
@@ -122,6 +133,9 @@ class SocialActionRecord(Base):
     target_scope: Mapped[str] = mapped_column(String(1024), nullable=False)
     claim_owner: Mapped[str | None] = mapped_column(String(255))
     claim_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    external_dispatch_started_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime()
+    )
     retry_available_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     published_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     error_page_url: Mapped[str | None] = mapped_column(Text)
@@ -184,7 +198,21 @@ class AccountStateRecord(Base):
             "failure_threshold IS NULL OR failure_threshold > 0",
             name="ck_account_states_failure_threshold_positive",
         ),
+        CheckConstraint(
+            "(execution_owner IS NULL AND execution_expires_at IS NULL) OR "
+            "(execution_owner IS NOT NULL AND execution_expires_at IS NOT NULL)",
+            name="ck_account_states_execution_lease_complete",
+        ),
+        CheckConstraint(
+            "execution_owner IS NULL OR length(trim(execution_owner)) > 0",
+            name="ck_account_states_execution_owner_nonempty",
+        ),
         Index("ix_account_states_paused", "paused", "paused_until"),
+        Index(
+            "ix_account_states_execution_lease",
+            "execution_expires_at",
+            "execution_owner",
+        ),
     )
 
     platform: Mapped[str] = mapped_column(String(16), primary_key=True)
@@ -193,6 +221,8 @@ class AccountStateRecord(Base):
     paused_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     paused_until: Mapped[datetime | None] = mapped_column(UTCDateTime())
     pause_reason: Mapped[str | None] = mapped_column(Text)
+    execution_owner: Mapped[str | None] = mapped_column(String(255))
+    execution_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     consecutive_failures: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0
     )
@@ -207,3 +237,5 @@ class AccountStateRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, default=utc_now, onupdate=utc_now
     )
+
+

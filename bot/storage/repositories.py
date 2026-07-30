@@ -76,6 +76,8 @@ class AccountState:
     last_error: str | None
     created_at: datetime
     updated_at: datetime
+    execution_owner: str | None = None
+    execution_expires_at: datetime | None = None
 
     def is_paused(self, at: datetime | None = None) -> bool:
         """Return whether the pause is active at an aware UTC timestamp."""
@@ -216,6 +218,8 @@ def _to_account_state(record: AccountStateRecord) -> AccountState:
         last_error=record.last_error,
         created_at=record.created_at,
         updated_at=record.updated_at,
+        execution_owner=record.execution_owner,
+        execution_expires_at=record.execution_expires_at,
     )
 
 
@@ -427,6 +431,7 @@ class ActionRepository:
                 retry_available_at=None,
                 claim_owner=None,
                 claim_expires_at=None,
+                external_dispatch_started_at=None,
                 updated_at=now,
             )
             .returning(SocialActionRecord)
@@ -520,6 +525,30 @@ class ActionRepository:
             message=reason,
         )
 
+    async def list_due_actions(
+        self,
+        limit: int = 100,
+        now: datetime | None = None,
+    ) -> list[SocialAction]:
+        """List currently eligible work without reserving or mutating it."""
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        instant = _now(now)
+        due_at = func.coalesce(
+            SocialActionRecord.retry_available_at,
+            SocialActionRecord.scheduled_at,
+            SocialActionRecord.created_at,
+        )
+        statement = (
+            select(SocialActionRecord)
+            .where(self._due_predicate(instant))
+            .order_by(due_at, SocialActionRecord.created_at, SocialActionRecord.id)
+            .limit(limit)
+        )
+        async with self._sessions() as session:
+            records = (await session.scalars(statement)).all()
+            return [_to_action(record) for record in records]
+
     async def claim_due_actions(
         self,
         worker_id: str,
@@ -558,6 +587,7 @@ class ActionRepository:
                 attempts=SocialActionRecord.attempts + 1,
                 claim_owner=owner,
                 claim_expires_at=lease_expires,
+                external_dispatch_started_at=None,
                 retry_available_at=None,
                 updated_at=instant,
             )
@@ -615,6 +645,7 @@ class ActionRepository:
                 attempts=SocialActionRecord.attempts + 1,
                 claim_owner=owner,
                 claim_expires_at=instant + lease_duration,
+                external_dispatch_started_at=None,
                 retry_available_at=None,
                 updated_at=instant,
             )
@@ -631,6 +662,145 @@ class ActionRepository:
                         "claimed",
                         to_status=ActionStatus.PROCESSING,
                         context={"worker_id": owner, "attempt": record.attempts},
+                        created_at=instant,
+                    )
+                )
+            return _to_action(record)
+
+    async def verify_claim(
+        self,
+        action_id: UUID | str,
+        worker_id: str,
+        now: datetime | None = None,
+    ) -> bool:
+        """Return whether a worker still owns an unexpired processing claim."""
+        owner = worker_id.strip()
+        if not owner:
+            raise ValueError("worker_id cannot be empty")
+        instant = _now(now)
+        statement = select(SocialActionRecord.id).where(
+            SocialActionRecord.id == str(action_id),
+            SocialActionRecord.status == ActionStatus.PROCESSING.value,
+            SocialActionRecord.claim_owner == owner,
+            SocialActionRecord.claim_expires_at.is_not(None),
+            SocialActionRecord.claim_expires_at > instant,
+        )
+        async with self._sessions() as session:
+            return (await session.scalar(statement)) is not None
+
+    async def begin_external_dispatch(
+        self,
+        action_id: UUID | str,
+        worker_id: str,
+        now: datetime | None = None,
+    ) -> SocialAction:
+        """Durably mark the boundary immediately before an external call."""
+        owner = worker_id.strip()
+        if not owner:
+            raise ValueError("worker_id cannot be empty")
+        instant = _now(now)
+        statement = (
+            update(SocialActionRecord)
+            .where(
+                SocialActionRecord.id == str(action_id),
+                SocialActionRecord.status == ActionStatus.PROCESSING.value,
+                SocialActionRecord.claim_owner == owner,
+                SocialActionRecord.claim_expires_at.is_not(None),
+                SocialActionRecord.claim_expires_at > instant,
+                SocialActionRecord.external_dispatch_started_at.is_(None),
+            )
+            .values(
+                external_dispatch_started_at=instant,
+                updated_at=instant,
+            )
+            .returning(SocialActionRecord)
+        )
+        async with self._sessions() as session:
+            async with session.begin():
+                record = (await session.scalars(statement)).one_or_none()
+                if record is None:
+                    await self._raise_claim_conflict(
+                        session, action_id, owner, "begin external dispatch for"
+                    )
+                session.add(
+                    _event(
+                        record.id,
+                        "external_dispatch_started",
+                        from_status=ActionStatus.PROCESSING,
+                        to_status=ActionStatus.PROCESSING,
+                        context={
+                            "worker_id": owner,
+                            "external_dispatch_started_at": instant.isoformat(),
+                        },
+                        created_at=instant,
+                    )
+                )
+            return _to_action(record)
+
+    async def defer_claim(
+        self,
+        action_id: UUID | str,
+        worker_id: str,
+        scheduled_at: datetime,
+        reason: str,
+    ) -> SocialAction:
+        """Release pre-dispatch work without consuming an execution attempt."""
+        owner = worker_id.strip()
+        if not owner:
+            raise ValueError("worker_id cannot be empty")
+        diagnostic = reason.strip()
+        if not diagnostic:
+            raise ValueError("reason cannot be empty")
+        retry_at = _as_utc(scheduled_at, name="scheduled_at")
+        instant = _now()
+        restored_attempts = case(
+            (
+                SocialActionRecord.attempts > 0,
+                SocialActionRecord.attempts - 1,
+            ),
+            else_=0,
+        )
+        statement = (
+            update(SocialActionRecord)
+            .where(
+                SocialActionRecord.id == str(action_id),
+                SocialActionRecord.status == ActionStatus.PROCESSING.value,
+                SocialActionRecord.claim_owner == owner,
+                SocialActionRecord.external_dispatch_started_at.is_(None),
+            )
+            .values(
+                status=ActionStatus.FAILED.value,
+                attempts=restored_attempts,
+                last_error=diagnostic,
+                retry_available_at=retry_at,
+                error_page_url=None,
+                error_screenshot_path=None,
+                external_dispatch_started_at=None,
+                claim_owner=None,
+                claim_expires_at=None,
+                updated_at=instant,
+            )
+            .returning(SocialActionRecord)
+        )
+        async with self._sessions() as session:
+            async with session.begin():
+                record = (await session.scalars(statement)).one_or_none()
+                if record is None:
+                    await self._raise_claim_conflict(
+                        session, action_id, owner, "defer"
+                    )
+                session.add(
+                    _event(
+                        record.id,
+                        "deferred",
+                        from_status=ActionStatus.PROCESSING,
+                        to_status=ActionStatus.FAILED,
+                        message=diagnostic,
+                        context={
+                            "worker_id": owner,
+                            "retry_available_at": retry_at.isoformat(),
+                            "restored_attempt": record.attempts,
+                        },
                         created_at=instant,
                     )
                 )
@@ -673,11 +843,22 @@ class ActionRepository:
         *,
         now: datetime | None = None,
     ) -> list[SocialAction]:
-        """Release expired processing leases and make retryable rows due."""
+        """Recover only pre-dispatch leases; uncertain outcomes require review."""
         instant = _now(now)
+        lease_error = "execution lease expired"
+        uncertain_error = (
+            "execution lease expired after external dispatch started; "
+            "outcome uncertain; manual review required"
+        )
+        dispatch_started = (
+            SocialActionRecord.external_dispatch_started_at.is_not(None)
+        )
         retry_at = case(
             (
-                SocialActionRecord.attempts < SocialActionRecord.max_attempts,
+                and_(
+                    SocialActionRecord.external_dispatch_started_at.is_(None),
+                    SocialActionRecord.attempts < SocialActionRecord.max_attempts,
+                ),
                 instant,
             ),
             else_=None,
@@ -691,7 +872,10 @@ class ActionRepository:
             )
             .values(
                 status=ActionStatus.FAILED.value,
-                last_error="execution lease expired",
+                last_error=case(
+                    (dispatch_started, uncertain_error),
+                    else_=lease_error,
+                ),
                 retry_available_at=retry_at,
                 claim_owner=None,
                 claim_expires_at=None,
@@ -703,13 +887,69 @@ class ActionRepository:
             async with session.begin():
                 records = list((await session.scalars(statement)).all())
                 for record in records:
+                    uncertain = record.external_dispatch_started_at is not None
+                    if uncertain:
+                        existing_indefinite_pause = and_(
+                            AccountStateRecord.paused.is_(True),
+                            AccountStateRecord.paused_until.is_(None),
+                        )
+                        pause_insert = sqlite_insert(AccountStateRecord).values(
+                            platform=record.platform,
+                            account_name=record.account_name,
+                            paused=True,
+                            paused_at=instant,
+                            paused_until=None,
+                            pause_reason=uncertain_error,
+                            created_at=instant,
+                            updated_at=instant,
+                        )
+                        pause_statement = pause_insert.on_conflict_do_update(
+                            index_elements=[
+                                AccountStateRecord.platform,
+                                AccountStateRecord.account_name,
+                            ],
+                            set_={
+                                "paused": True,
+                                "paused_at": case(
+                                    (
+                                        existing_indefinite_pause,
+                                        func.coalesce(
+                                            AccountStateRecord.paused_at,
+                                            instant,
+                                        ),
+                                    ),
+                                    else_=instant,
+                                ),
+                                "paused_until": None,
+                                "pause_reason": uncertain_error,
+                                "updated_at": instant,
+                            },
+                        )
+                        await session.execute(pause_statement)
                     session.add(
                         _event(
                             record.id,
-                            "claim_expired",
+                            (
+                                "claim_expired_uncertain"
+                                if uncertain
+                                else "claim_expired"
+                            ),
                             from_status=ActionStatus.PROCESSING,
                             to_status=ActionStatus.FAILED,
-                            message="execution lease expired",
+                            message=uncertain_error if uncertain else lease_error,
+                            context=(
+                                {
+                                    "external_dispatch_started_at": (
+                                        record.external_dispatch_started_at.isoformat()
+                                    ),
+                                    "manual_review_required": True,
+                                    "account_paused_indefinitely": True,
+                                    "platform": record.platform,
+                                    "account_name": record.account_name,
+                                }
+                                if uncertain
+                                else None
+                            ),
                             created_at=instant,
                         )
                     )
@@ -747,6 +987,7 @@ class ActionRepository:
                 error_screenshot_path=None,
                 claim_owner=None,
                 claim_expires_at=None,
+                external_dispatch_started_at=None,
                 updated_at=instant,
             )
             .returning(SocialActionRecord)
@@ -814,6 +1055,7 @@ class ActionRepository:
                 error_screenshot_path=screenshot_path,
                 claim_owner=None,
                 claim_expires_at=None,
+                external_dispatch_started_at=None,
                 updated_at=instant,
             )
             .returning(SocialActionRecord)
@@ -1014,9 +1256,25 @@ class ActionRepository:
             SocialActionRecord.claim_expires_at.is_(None),
             SocialActionRecord.claim_expires_at <= instant,
         )
+        active_account_pause = (
+            select(AccountStateRecord.platform)
+            .where(
+                AccountStateRecord.platform == SocialActionRecord.platform,
+                AccountStateRecord.account_name == SocialActionRecord.account_name,
+                AccountStateRecord.paused.is_(True),
+                or_(
+                    AccountStateRecord.paused_until.is_(None),
+                    AccountStateRecord.paused_until > instant,
+                ),
+            )
+            .correlate(SocialActionRecord)
+            .exists()
+        )
         return and_(
             due_status,
             claim_available,
+            SocialActionRecord.external_dispatch_started_at.is_(None),
+            ~active_account_pause,
             SocialActionRecord.status != ActionStatus.PUBLISHED.value,
             SocialActionRecord.attempts < SocialActionRecord.max_attempts,
         )
@@ -1141,6 +1399,119 @@ class AccountStateRepository:
                 if record is None:
                     raise RepositoryError("account state upsert did not produce a row")
             return _to_account_state(record)
+
+    async def acquire_execution_lease(
+        self,
+        platform: Platform | str,
+        account_name: str,
+        owner: str,
+        lease_duration: timedelta,
+        now: datetime | None = None,
+    ) -> bool:
+        """Atomically create or reserve an account for one execution owner."""
+        reservation_owner = owner.strip()
+        if not reservation_owner:
+            raise ValueError("owner cannot be empty")
+        if lease_duration <= timedelta(0):
+            raise ValueError("lease_duration must be positive")
+        platform_value = _platform_value(platform)
+        instant = _now(now)
+        lease_expires = instant + lease_duration
+        insert_statement = sqlite_insert(AccountStateRecord).values(
+            platform=platform_value,
+            account_name=account_name,
+            execution_owner=reservation_owner,
+            execution_expires_at=lease_expires,
+            created_at=instant,
+            updated_at=instant,
+        )
+        lease_available = or_(
+            AccountStateRecord.execution_owner.is_(None),
+            AccountStateRecord.execution_expires_at <= instant,
+            AccountStateRecord.execution_owner == reservation_owner,
+        )
+        statement = (
+            insert_statement.on_conflict_do_update(
+                index_elements=[
+                    AccountStateRecord.platform,
+                    AccountStateRecord.account_name,
+                ],
+                set_={
+                    "execution_owner": reservation_owner,
+                    "execution_expires_at": lease_expires,
+                    "updated_at": instant,
+                },
+                where=lease_available,
+            )
+            .returning(AccountStateRecord.platform)
+        )
+        async with self._sessions() as session:
+            async with session.begin():
+                return (await session.scalar(statement)) is not None
+
+    async def renew_execution_lease(
+        self,
+        platform: Platform | str,
+        account_name: str,
+        owner: str,
+        lease_duration: timedelta,
+        now: datetime | None = None,
+    ) -> bool:
+        """Extend an execution lease only while its exact owner still holds it."""
+        reservation_owner = owner.strip()
+        if not reservation_owner:
+            raise ValueError("owner cannot be empty")
+        if lease_duration <= timedelta(0):
+            raise ValueError("lease_duration must be positive")
+        instant = _now(now)
+        statement = (
+            update(AccountStateRecord)
+            .where(
+                AccountStateRecord.platform == _platform_value(platform),
+                AccountStateRecord.account_name == account_name,
+                AccountStateRecord.execution_owner == reservation_owner,
+                AccountStateRecord.execution_expires_at.is_not(None),
+                AccountStateRecord.execution_expires_at > instant,
+            )
+            .values(
+                execution_expires_at=instant + lease_duration,
+                updated_at=instant,
+            )
+            .returning(AccountStateRecord.platform)
+        )
+        async with self._sessions() as session:
+            async with session.begin():
+                return (await session.scalar(statement)) is not None
+
+    async def release_execution_lease(
+        self,
+        platform: Platform | str,
+        account_name: str,
+        owner: str,
+        now: datetime | None = None,
+    ) -> bool:
+        """Release an account reservation without disturbing a newer owner."""
+        reservation_owner = owner.strip()
+        if not reservation_owner:
+            raise ValueError("owner cannot be empty")
+        instant = _now(now)
+        statement = (
+            update(AccountStateRecord)
+            .where(
+                AccountStateRecord.platform == _platform_value(platform),
+                AccountStateRecord.account_name == account_name,
+                AccountStateRecord.execution_owner == reservation_owner,
+            )
+            .values(
+                execution_owner=None,
+                execution_expires_at=None,
+                updated_at=instant,
+            )
+            .returning(AccountStateRecord.platform)
+        )
+        async with self._sessions() as session:
+            async with session.begin():
+                return (await session.scalar(statement)) is not None
 
     async def pause(
         self,

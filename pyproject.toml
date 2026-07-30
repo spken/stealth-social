@@ -9,6 +9,7 @@ description = "Safety-first social platform automation"
 requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.20",
+    "click==8.1.8",
     "cloakbrowser==0.5.2",
     "filelock>=3.20.1,<4",
     "pydantic>=2.10",
@@ -17,8 +18,11 @@ dependencies = [
     "PyYAML>=6.0",
     "SQLAlchemy[asyncio]>=2.0",
     "structlog>=24.4",
-    "typer>=0.15",
+    "typer==0.15.4",
 ]
+
+[project.scripts]
+social-bot = "bot.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
