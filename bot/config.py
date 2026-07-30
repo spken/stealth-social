@@ -129,7 +129,7 @@ class AccountsSettings(_ConfigModel):
 class Settings(BaseSettings):
     """Validated settings assembled from defaults, a file, and environment."""
 
-    database_url: NonEmptyString = "sqlite:///data/social_bot.db"
+    database_url: NonEmptyString = "sqlite:///data/stealth.db"
     dry_run: bool = True
     manual_approval: bool = True
     global_pause: bool = False
