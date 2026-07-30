@@ -1,0 +1,32 @@
+{
+  "database_url": "sqlite:///data/social_bot.db",
+  "dry_run": true,
+  "manual_approval": true,
+  "browser": {
+    "headless": false,
+    "screenshots_directory": "data/screenshots",
+    "sessions_directory": "data/sessions"
+  },
+  "limits": {
+    "minimum_seconds_between_actions": 120,
+    "maximum_actions_per_hour": 5,
+    "maximum_actions_per_day": 20,
+    "duplicate_window_hours": 168
+  },
+  "accounts": {
+    "x": {
+      "main": {
+        "session_profile": "x-main"
+      }
+    },
+    "reddit": {
+      "main": {
+        "session_profile": "reddit-main",
+        "allowed_subreddits": [
+          "SideProject",
+          "SaaS"
+        ]
+      }
+    }
+  }
+}
