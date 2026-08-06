@@ -25,7 +25,7 @@ Install Ollama using its official installer, start the local service, and instal
 
 ```bash
 ollama pull qwen3:8b
-ollama list
+ollama ls
 ollama run qwen3:8b
 ```
 
@@ -37,7 +37,7 @@ python -m bot ollama models
 python -m bot ollama check
 ```
 
-Generation uses non-streaming structured JSON with `think=false` by default. The bot never stores or logs reasoning, cookies, browser storage, credentials, complete prompts, or complete malformed responses, and it never downloads a model automatically. A missing model reports the exact `ollama pull <model>` guidance.
+Generation uses non-streaming structured JSON with `think=false` by default. The application does not inspect, export, separately persist, or log cookies, browser storage, credentials, reasoning, complete prompts, or complete malformed responses. Authenticated persistent browser profiles necessarily retain platform session state under the configured `browser.sessions_directory`; protect that directory like a credential store. The bot never downloads a model automatically. A missing model reports the exact `ollama pull <model>` guidance.
 
 ## Browser-only examples
 
@@ -155,7 +155,7 @@ python -m bot autopost daily-x
 python -m bot autopost weekly-reddit
 ```
 
-It is intentionally configuration-only: the command accepts only a campaign ID. Before it can generate or open browser-backed publishing resources, the campaign, account, global pause, dry-run mode, content_generation.enabled, unattended-approval, and unattended-publishing gates must all allow the operation. The checked-in campaigns are safe examples: dry-run and both unattended capabilities remain disabled. Set content_generation.enabled=true only in a reviewed local configuration when Ollama is available.
+It is intentionally configuration-only: the command accepts only a campaign ID. Before it can generate or open browser-backed publishing resources, the campaign, account, global pause, dry-run mode, content_generation.enabled, unattended-approval, and unattended-publishing gates must all allow the operation. The checked-in configuration enables local content generation, but its example campaigns cannot publish because dry-run mode is enabled and both unattended capabilities are disabled. Keep those publication gates disabled until the local configuration, Ollama model, browser profiles, and campaign policy have been reviewed.
 
 Install the example Linux user units from the repository checkout:
 
@@ -173,7 +173,7 @@ journalctl --user -u 'stealth-autopost@daily-x.service'
 
 The service example uses %h/stealth-social for WorkingDirectory, configuration, and the virtualenv. Change every %h/stealth-social path if the checkout lives elsewhere. Install it as the Linux user who owns the authenticated browser profiles and configuration; do not run it as root. If the machine must run user timers without an interactive login, an administrator can perform the one-time operation loginctl enable-linger USERNAME.
 
-Use a headless-capable browser configuration and authenticate each configured browser profile manually before enabling a timer. Confirm the same saved profiles work in the unattended environment. Start Ollama at boot and install the configured model before enabling generation. Keep config.json and any environment files readable only by the owning user (for example, chmod 600 config.json). The service uses bounded restart and timeout settings; status 75 is retryable, while statuses 2 and 3 are not automatically retried.
+Use a headless-capable browser configuration and authenticate each configured browser profile manually before enabling a timer. Confirm the same saved profiles work in the unattended environment. Start Ollama at boot and install the configured model before enabling generation. Keep config.json and any environment files readable only by the owning user (for example, chmod 600 config.json). The service waits five minutes before restarting after a failure and limits each invocation to 75 minutes; statuses 2 and 3 are excluded from automatic restart, while status 75 is retryable.
 
 Exit statuses are stable: 0 means published or safely skipped by cooldown, 2 means invalid configuration or a disabled policy capability, 3 means manual attention is required, and 75 means a bounded temporary failure. For status 3, inspect the JSON result and persisted request/action state, then check the service journal and re-authenticate or resolve the named safety condition before rerunning. A retry never creates replacement content while resumable persisted work exists.
 
@@ -221,7 +221,7 @@ Reset deletes drafts, schedules, action history, examples, candidates, and topic
 
 ## Troubleshooting and verification
 
-- Ollama unavailable: start the local service and run `ollama status`, then `python -m bot ollama status`.
+- Ollama unavailable: start the local service, use `ollama ps` to inspect currently loaded models, then run `python -m bot ollama status` to check the configured endpoint.
 - Model missing: run `python -m bot ollama check` and follow its exact `ollama pull qwen3:8b` guidance; the bot will not pull it.
 - Timeout or malformed structured output: lower the context budget or inspect the bounded safe error; the generator makes at most one structure-only repair attempt.
 - Browser authentication: run `login` for the configured profile. Do not bypass a challenge or login wall.
@@ -230,7 +230,13 @@ Reset deletes drafts, schedules, action history, examples, candidates, and topic
 - No safe unattended candidate: the request remains without automatic approval and needs manual review.
 - Broken Python environment: verify Python 3.12+ and dependencies before running compile/import/help checks. Unavailable browser, Ollama, schema, or runtime smoke checks must be reported as unavailable, never as passing.
 
-Safe verification is based on compilation, imports, configuration loading, fresh disposable-schema inspection, CLI help, static safety scans, and manual dry-run scenarios. This project intentionally adds no automated tests, fixtures, snapshots, or CI workflows.
+Safe verification includes automated `unittest` coverage for autopost configuration, locking, repository recovery, service behavior, CLI exit contracts, and topic/request construction. Run it without contacting Ollama, a browser, or a social platform:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The broader content-generation system is verified with compilation, imports, configuration loading, fresh disposable-schema inspection, CLI help, static safety scans, and manual dry-run scenarios. Live Ollama, authenticated-browser, scheduling, and publication checks must be reported separately rather than inferred from the unit suite.
 
 ## Remaining project TODO
 
