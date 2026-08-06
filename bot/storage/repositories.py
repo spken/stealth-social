@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, NoReturn
 from uuid import UUID
 
 from sqlalchemy import and_, case, delete, func, or_, select, update
@@ -190,6 +190,11 @@ def _to_action(record: SocialActionRecord) -> SocialAction:
             "parent_comment_id": record.parent_comment_id,
             "created_at": record.created_at,
             "scheduled_at": record.scheduled_at,
+            "claim_owner": record.claim_owner,
+            "claim_expires_at": record.claim_expires_at,
+            "external_dispatch_started_at": record.external_dispatch_started_at,
+            "retry_available_at": record.retry_available_at,
+            "published_at": record.published_at,
             "status": record.status,
             "attempts": record.attempts,
             "max_attempts": record.max_attempts,
@@ -274,6 +279,16 @@ class ActionRepository:
         self._sessions = session_factory
 
     async def create(self, action: SocialAction) -> SocialAction:
+        async with self._sessions() as session:
+            async with session.begin():
+                return await self.create_in_session(session, action)
+
+    async def create_in_session(
+        self,
+        session: AsyncSession,
+        action: SocialAction,
+    ) -> SocialAction:
+        """Insert an action using a caller-owned transaction and session."""
         action = _revalidate_action(action)
         status = ActionStatus(action.status)
         if status not in {
@@ -295,17 +310,16 @@ class ActionRepository:
             **values,
         )
         try:
-            async with self._sessions() as session:
-                async with session.begin():
-                    session.add(record)
-                    session.add(
-                        _event(
-                            record.id,
-                            "created",
-                            to_status=action.status,
-                            created_at=now,
-                        )
-                    )
+            session.add(record)
+            session.add(
+                _event(
+                    record.id,
+                    "created",
+                    to_status=action.status,
+                    created_at=now,
+                )
+            )
+            await session.flush()
         except IntegrityError as error:
             raise ActionAlreadyExistsError(f"action {action.id} already exists") from error
         return _to_action(record)
@@ -888,7 +902,20 @@ class ActionRepository:
                 records = list((await session.scalars(statement)).all())
                 for record in records:
                     uncertain = record.external_dispatch_started_at is not None
+                    uncertain_context: dict[str, Any] | None = None
                     if uncertain:
+                        dispatch_started_at = record.external_dispatch_started_at
+                        if dispatch_started_at is None:
+                            raise RuntimeError(
+                                "uncertain action is missing its dispatch timestamp"
+                            )
+                        uncertain_context = {
+                            "external_dispatch_started_at": dispatch_started_at.isoformat(),
+                            "manual_review_required": True,
+                            "account_paused_indefinitely": True,
+                            "platform": record.platform,
+                            "account_name": record.account_name,
+                        }
                         existing_indefinite_pause = and_(
                             AccountStateRecord.paused.is_(True),
                             AccountStateRecord.paused_until.is_(None),
@@ -937,19 +964,7 @@ class ActionRepository:
                             from_status=ActionStatus.PROCESSING,
                             to_status=ActionStatus.FAILED,
                             message=uncertain_error if uncertain else lease_error,
-                            context=(
-                                {
-                                    "external_dispatch_started_at": (
-                                        record.external_dispatch_started_at.isoformat()
-                                    ),
-                                    "manual_review_required": True,
-                                    "account_paused_indefinitely": True,
-                                    "platform": record.platform,
-                                    "account_name": record.account_name,
-                                }
-                                if uncertain
-                                else None
-                            ),
+                            context=uncertain_context,
                             created_at=instant,
                         )
                     )
@@ -1315,7 +1330,7 @@ class ActionRepository:
         session: AsyncSession,
         action_id: UUID | str,
         operation: str,
-    ) -> None:
+    ) -> NoReturn:
         status = await session.scalar(
             select(SocialActionRecord.status).where(
                 SocialActionRecord.id == str(action_id)
@@ -1333,7 +1348,7 @@ class ActionRepository:
         action_id: UUID | str,
         worker_id: str,
         operation: str,
-    ) -> None:
+    ) -> NoReturn:
         row = (
             await session.execute(
                 select(

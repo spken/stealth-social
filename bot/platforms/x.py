@@ -986,7 +986,7 @@ def _parse_status_url(value: str) -> _ReplyTarget:
     parsed = _split_safe_url(value)
     if parsed is None:
         raise ValueError("invalid status URL")
-    if parsed.hostname.casefold() not in _X_TARGET_HOSTS:
+    if parsed.hostname is None or parsed.hostname.casefold() not in _X_TARGET_HOSTS:
         raise ValueError("unsupported X status host")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("status URL must not contain user information")

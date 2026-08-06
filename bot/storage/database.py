@@ -6,8 +6,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from sqlalchemy import event, inspect
-from sqlalchemy.engine import Connection, make_url
+from sqlalchemy import event
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -17,6 +17,8 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from bot.storage.models import Base
+# Import content mappers before create_all; the schema is intentionally disposable.
+from bot.storage import content_models as _content_models  # noqa: F401
 
 AsyncSessionFactory = async_sessionmaker[AsyncSession]
 
@@ -68,89 +70,9 @@ def create_async_sqlite_engine(
     return engine
 
 
-_ADDITIVE_COLUMN_MIGRATIONS = (
-    (
-        "social_actions",
-        "external_dispatch_started_at",
-        'ALTER TABLE "social_actions" '
-        'ADD COLUMN "external_dispatch_started_at" DATETIME',
-    ),
-    (
-        "account_states",
-        "execution_owner",
-        'ALTER TABLE "account_states" '
-        'ADD COLUMN "execution_owner" VARCHAR(255)',
-    ),
-    (
-        "account_states",
-        "execution_expires_at",
-        'ALTER TABLE "account_states" '
-        'ADD COLUMN "execution_expires_at" DATETIME',
-    ),
-)
-
-_LEGACY_PROCESSING_DISPATCH_BACKFILL = (
-    'UPDATE "social_actions" '
-    'SET "external_dispatch_started_at" = '
-    'COALESCE("updated_at", "created_at", CURRENT_TIMESTAMP) '
-    'WHERE "status" = \'processing\' '
-    'AND "external_dispatch_started_at" IS NULL'
-)
-
-_ADDITIVE_INDEX_MIGRATIONS = (
-    (
-        "social_actions",
-        'CREATE INDEX IF NOT EXISTS "ix_social_actions_claim_recovery" '
-        'ON "social_actions" '
-        '("status", "claim_expires_at", "external_dispatch_started_at")',
-    ),
-    (
-        "account_states",
-        'CREATE INDEX IF NOT EXISTS "ix_account_states_execution_lease" '
-        'ON "account_states" ("execution_expires_at", "execution_owner")',
-    ),
-)
-
-
-def _migrate_additive_runtime_schema(connection: Connection) -> None:
-    """Add runtime lease columns and indexes to an existing SQLite schema."""
-    if connection.dialect.name != "sqlite":
-        return
-
-    inspector = inspect(connection)
-    columns_by_table: dict[str, set[str] | None] = {}
-    for table_name, column_name, ddl in _ADDITIVE_COLUMN_MIGRATIONS:
-        if table_name not in columns_by_table:
-            columns_by_table[table_name] = (
-                {
-                    str(column["name"])
-                    for column in inspector.get_columns(table_name)
-                }
-                if inspector.has_table(table_name)
-                else None
-            )
-        existing_columns = columns_by_table[table_name]
-        if existing_columns is not None and column_name not in existing_columns:
-            connection.exec_driver_sql(ddl)
-            existing_columns.add(column_name)
-            if (
-                table_name == "social_actions"
-                and column_name == "external_dispatch_started_at"
-            ):
-                connection.exec_driver_sql(
-                    _LEGACY_PROCESSING_DISPATCH_BACKFILL
-                )
-
-    for table_name, ddl in _ADDITIVE_INDEX_MIGRATIONS:
-        if columns_by_table.get(table_name) is not None:
-            connection.exec_driver_sql(ddl)
-
-
 async def create_schema(engine: AsyncEngine) -> None:
-    """Create or additively upgrade the application schema."""
+    """Create the complete disposable application schema."""
     async with engine.begin() as connection:
-        await connection.exec_driver_sql("BEGIN IMMEDIATE")
-        await connection.run_sync(_migrate_additive_runtime_schema)
         await connection.run_sync(Base.metadata.create_all)
 
 

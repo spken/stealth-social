@@ -1,4 +1,4 @@
-"""Shared domain models for social actions and generated content."""
+"""Shared domain models for social actions."""
 
 from __future__ import annotations
 
@@ -110,6 +110,11 @@ class SocialAction(_DomainModel):
     parent_comment_id: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     scheduled_at: datetime | None = None
+    claim_owner: str | None = None
+    claim_expires_at: datetime | None = None
+    external_dispatch_started_at: datetime | None = None
+    retry_available_at: datetime | None = None
+    published_at: datetime | None = None
     status: ActionStatus = ActionStatus.DRAFT
     attempts: NonNegativeInt = 0
     max_attempts: PositiveInt = 3
@@ -134,7 +139,14 @@ class SocialAction(_DomainModel):
         """Represent blank optional fields consistently as absent."""
         return value or None
 
-    @field_validator("created_at", "scheduled_at")
+    @field_validator(
+        "created_at",
+        "scheduled_at",
+        "claim_expires_at",
+        "external_dispatch_started_at",
+        "retry_available_at",
+        "published_at",
+    )
     @classmethod
     def normalize_timestamp(cls, value: datetime | None) -> datetime | None:
         """Interpret naive timestamps as UTC and convert aware values to UTC."""
@@ -284,44 +296,6 @@ class ActionResult(_DomainModel):
     external_content_url: str | None = None
     message: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class ContentRequest(_DomainModel):
-    """Input to a content generator.
-
-    ``content`` supplies an exact deterministic body when present; otherwise a
-    generator derives the body from ``prompt``.
-    """
-
-    action_type: ActionType
-    prompt: str | None = None
-    content: str | None = None
-    title: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-    @field_validator("prompt", "content", "title")
-    @classmethod
-    def normalize_blank_strings(cls, value: str | None) -> str | None:
-        return value or None
-
-    @model_validator(mode="after")
-    def require_source(self) -> Self:
-        if self.content is None and self.prompt is None:
-            raise ValueError("content request requires supplied content or a prompt")
-        return self
-
-
-class GeneratedContent(_DomainModel):
-    """Content produced by a content generator."""
-
-    content: NonEmptyString
-    title: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-    @field_validator("title")
-    @classmethod
-    def normalize_blank_title(cls, value: str | None) -> str | None:
-        return value or None
 
 
 def normalized_content_fingerprint(action: SocialAction) -> str:

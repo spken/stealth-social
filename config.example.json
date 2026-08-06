@@ -2,6 +2,11 @@
   "database_url": "sqlite:///data/stealth.db",
   "dry_run": true,
   "manual_approval": true,
+  "global_pause": false,
+  "randomized_delay": {
+    "minimum_seconds": 5,
+    "maximum_seconds": 30
+  },
   "browser": {
     "headless": false,
     "screenshots_directory": "data/screenshots",
@@ -11,22 +16,146 @@
     "minimum_seconds_between_actions": 120,
     "maximum_actions_per_hour": 5,
     "maximum_actions_per_day": 20,
-    "duplicate_window_hours": 168
+    "duplicate_window_hours": 168,
+    "failure_threshold": 3,
+    "platforms": {
+      "x": {},
+      "reddit": {}
+    }
   },
   "accounts": {
     "x": {
       "main": {
-        "session_profile": "x-main"
+        "session_profile": "x-main-example",
+        "identity": "Example Builder (fictional)",
+        "products": ["Example Toolkit"],
+        "verified_facts": ["Example Toolkit is a fictional local project used in this sample."],
+        "forbidden_claims": ["guaranteed results", "customer counts"],
+        "required_disclosures": []
       }
     },
     "reddit": {
       "main": {
-        "session_profile": "reddit-main",
-        "allowed_subreddits": [
-          "SideProject",
-          "SaaS"
-        ]
+        "session_profile": "reddit-main-example",
+        "allowed_subreddits": ["SideProject", "SaaS"],
+        "identity": "Example Builder (fictional)",
+        "products": ["Example Toolkit"],
+        "verified_facts": ["Example Toolkit is a fictional local project used in this sample."],
+        "forbidden_claims": ["guaranteed results", "customer counts"],
+        "required_disclosures": [],
+        "community_rules": {
+          "SideProject": {
+            "allow_promotional_content": false,
+            "required_disclosures": [],
+            "forbidden_phrases": [],
+            "maximum_title_characters": 300,
+            "maximum_body_characters": 40000
+          },
+          "SaaS": {
+            "allow_promotional_content": false,
+            "required_disclosures": [],
+            "forbidden_phrases": [],
+            "maximum_title_characters": 300,
+            "maximum_body_characters": 40000
+          }
+        }
       }
     }
+  },
+  "content_generation": {
+    "provider": "ollama",
+    "enabled": true,
+    "base_url": "http://localhost:11434",
+    "model": "qwen3:8b",
+    "thinking": false,
+    "request_timeout_seconds": 180,
+    "maximum_retries": 2,
+    "temperature": 0.75,
+    "top_p": 0.9,
+    "candidate_count": 3,
+    "maximum_context_examples": 8,
+    "maximum_example_characters": 12000,
+    "ranking_mode": "heuristic",
+    "debug_prompt_logging": false,
+    "allow_generated_style_examples": false
+  },
+  "generation_profiles": {
+    "x_post": {
+      "temperature": 0.85,
+      "candidate_count": 3
+    },
+    "x_reply": {
+      "temperature": 0.65,
+      "candidate_count": 3
+    },
+    "reddit_post": {
+      "temperature": 0.8,
+      "candidate_count": 3
+    },
+    "reddit_comment": {
+      "temperature": 0.65,
+      "candidate_count": 3
+    },
+    "reddit_reply": {
+      "temperature": 0.6,
+      "candidate_count": 3
+    }
+  },
+  "example_collection": {
+    "enabled": true,
+    "maximum_items_per_source": 25,
+    "maximum_comments_per_post": 20,
+    "refresh_interval_hours": 24,
+    "expiry_interval_hours": 168,
+    "minimum_score": 5,
+    "include_own_content": true,
+    "useful_window_days": 90,
+    "x": {
+      "account": "main",
+      "accounts": [],
+      "queries": [],
+      "post_urls": []
+    },
+    "reddit": {
+      "account": "main",
+      "subreddits": ["SideProject", "SaaS"],
+      "queries": [],
+      "post_urls": [],
+      "sort": "top",
+      "time_filter": "month"
+    }
+  },
+  "autopost_campaigns": {
+    "daily-x": {
+      "enabled": true,
+      "platform": "x",
+      "account": "main",
+      "topics": [
+        "A lesson from building local-first tools",
+        "A useful automation pattern",
+        "A small project update"
+      ],
+      "minimum_interval_hours": 20,
+      "purpose": "educational",
+      "tone": "practical and concise"
+    },
+    "weekly-reddit": {
+      "enabled": true,
+      "platform": "reddit",
+      "account": "main",
+      "subreddit": "SideProject",
+      "topics": [
+        "A lesson learned while building",
+        "A technical decision worth discussing"
+      ],
+      "minimum_interval_hours": 144,
+      "purpose": "builder-update",
+      "tone": "transparent and conversational"
+    }
+  },
+  "automation": {
+    "allow_scheduled_generation": true,
+    "allow_unattended_approval": false,
+    "allow_unattended_publishing": false
   }
 }

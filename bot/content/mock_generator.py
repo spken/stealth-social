@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from bot.models import ContentRequest, GeneratedContent
+from bot.content.models import CandidateDraft, ContentRequest, GenerationResult
 
 
 class MockContentGenerator:
@@ -16,12 +16,36 @@ class MockContentGenerator:
         self._content = content
         self._title = title
 
-    async def generate(self, request: ContentRequest) -> GeneratedContent:
-        """Resolve content deterministically, preferring explicitly supplied text."""
-        content = self._content or request.content or request.prompt
-        if content is None:
-            raise ValueError("content request did not provide content or a prompt")
-        title = self._title if self._title is not None else request.title
-        metadata = dict(request.metadata)
-        metadata["generator"] = "mock"
-        return GeneratedContent(content=content, title=title, metadata=metadata)
+    async def generate(self, request: ContentRequest) -> GenerationResult:
+        """Return a deterministic batch without external services."""
+        count = request.candidate_count
+        base = self._content or request.topic or request.goal or "a useful idea"
+        body = f"A practical note about {base}, with a clear takeaway for the community."
+        strategies = request.strategy_names
+        if len(strategies) != count:
+            strategies = tuple(
+                f"mock strategy {index}" for index in range(1, count + 1)
+            )
+        title = self._title
+        if title is None and request.generation_type.value == "reddit_post":
+            title = f"A practical note about {base}"
+        drafts = tuple(
+            CandidateDraft(
+                title=title,
+                body=body if count == 1 else f"{body} ({index})",
+                strategy=strategies[index - 1],
+                used_example_ids=tuple(
+                    item.example_id for item in request.selected_examples
+                ),
+            )
+            for index in range(1, count + 1)
+        )
+        return GenerationResult(
+            candidates=drafts,
+            model_name="mock",
+            resolved_parameters=dict(request.resolved_parameters),
+            latency_seconds=0.0,
+            prompt_tokens=0,
+            completion_tokens=0,
+            metadata={"generator": "mock"},
+        )

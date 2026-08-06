@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly Reddit autopost timer
+
+[Timer]
+OnCalendar=Mon *-*-* 11:00:00
+Persistent=true
+Unit=stealth-autopost@weekly-reddit.service
+
+[Install]
+WantedBy=timers.target

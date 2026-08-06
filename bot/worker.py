@@ -226,6 +226,7 @@ class Worker:
         random_source: JitterSource | None = None,
         clock: Callable[[], datetime] | None = None,
         worker_id: str | None = None,
+        close_shared_resources: bool = True,
     ) -> None:
         if polling_interval <= 0:
             raise ValueError("polling_interval must be positive")
@@ -280,6 +281,7 @@ class Worker:
         self._random = random_source or SystemRandom()
         self._clock = clock or (lambda: datetime.now(UTC))
         self._worker_id = resolved_worker_id.strip()
+        self._close_shared_resources = close_shared_resources
         self._stop_event = asyncio.Event()
         self._active_tasks: set[asyncio.Task[ActionExecutionReport]] = set()
         self._initialize_lock = asyncio.Lock()
@@ -411,6 +413,13 @@ class Worker:
         self._active_tasks.update(tasks)
         try:
             results = tuple(await asyncio.gather(*tasks)) if tasks else ()
+        except asyncio.CancelledError:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         finally:
             self._active_tasks.difference_update(tasks)
 
@@ -894,13 +903,16 @@ class Worker:
                 for task in self._active_tasks
                 if task is not current_task and not task.done()
             )
-            if active:
-                await asyncio.gather(*active, return_exceptions=True)
             try:
-                await self._browser_manager.shutdown()
+                for task in active:
+                    task.cancel()
+                if active:
+                    await asyncio.gather(*active, return_exceptions=True)
+                if self._close_shared_resources:
+                    await self._browser_manager.shutdown()
             finally:
                 try:
-                    if self._database is not None:
+                    if self._close_shared_resources and self._database is not None:
                         await self._database.close()
                 finally:
                     if isinstance(self._adapter_factory, AdapterFactory):

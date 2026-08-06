@@ -853,10 +853,17 @@ class BrowserManager:
 
             self._closed = True
             close_errors: list[Exception] = []
+            cancellation_error: asyncio.CancelledError | None = None
             for state in self._profiles.values():
                 async with state.lock:
                     try:
                         await self._close_context(state)
+                    except asyncio.CancelledError as error:
+                        cancellation_error = error
+                        try:
+                            await _finish_close_after_cancellation(self, state)
+                        except Exception as cleanup_error:
+                            close_errors.append(cleanup_error)
                     except Exception as error:
                         close_errors.append(error)
                         logger.error(
@@ -866,6 +873,8 @@ class BrowserManager:
                             error_type=type(error).__name__,
                         )
 
+            if cancellation_error is not None:
+                raise cancellation_error
             if close_errors:
                 error_group = ExceptionGroup(
                     "Browser context close failures",
@@ -875,3 +884,18 @@ class BrowserManager:
                     "One or more browser contexts failed to close"
                 ) from error_group
             logger.info("browser_manager_shutdown_complete")
+
+
+async def _finish_close_after_cancellation(
+    manager: BrowserManager,
+    state: _ProfileState,
+) -> None:
+    """Complete one context close after shutdown cancellation was observed."""
+
+    close_task = asyncio.create_task(manager._close_context(state))
+    while not close_task.done():
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            continue
+    close_task.result()

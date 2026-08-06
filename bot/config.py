@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Literal, Self
 
 import yaml
 from pydantic import (
     BaseModel,
     ConfigDict,
+    AnyHttpUrl,
     Field,
     NonNegativeFloat,
     NonNegativeInt,
+    PositiveFloat,
     PositiveInt,
     StringConstraints,
     ValidationError,
@@ -28,6 +31,10 @@ from pydantic_settings import (
 )
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
+from yaml.error import MarkedYAMLError
+
+from bot.content.models import ContentPurpose, GenerationType, RankingMode
+from bot.models import Platform
 
 CONFIG_PATH_ENVIRONMENT_VARIABLE = "STEALTH_BOT_CONFIG"
 
@@ -35,6 +42,8 @@ NonEmptyString = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1),
 ]
+
+_AUTOPOST_CAMPAIGN_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 class ConfigurationError(ValueError):
@@ -101,12 +110,111 @@ class BrowserSettings(_ConfigModel):
     sessions_directory: Path = Path("data/sessions")
 
 
+class ContentGenerationSettings(_ConfigModel):
+    """Resolved defaults for the local structured generator."""
+
+    provider: Literal["ollama"] = "ollama"
+    enabled: bool = True
+    base_url: AnyHttpUrl = AnyHttpUrl("http://localhost:11434")
+    model: NonEmptyString = "qwen3:8b"
+    thinking: bool = False
+    request_timeout_seconds: PositiveFloat = 180.0
+    maximum_retries: NonNegativeInt = 2
+    temperature: float = Field(default=0.75, ge=0.0, le=2.0)
+    top_p: float = Field(default=0.9, gt=0.0, le=1.0)
+    candidate_count: int = Field(default=3, ge=1, le=10)
+    maximum_context_examples: int = Field(default=8, ge=0, le=50)
+    maximum_example_characters: int = Field(default=12000, ge=0, le=100000)
+    ranking_mode: RankingMode = RankingMode.HEURISTIC
+    debug_prompt_logging: bool = False
+    allow_generated_style_examples: bool = False
+
+    @model_validator(mode="after")
+    def validate_base_url(self) -> Self:
+        if self.base_url.username or self.base_url.password:
+            raise ValueError("content_generation.base_url must not contain credentials")
+        if self.base_url.query or self.base_url.fragment:
+            raise ValueError(
+                "content_generation.base_url must not contain a query or fragment"
+            )
+        return self
+
+
+class GenerationProfileSettings(_ConfigModel):
+    """Optional per-generation-type overrides layered over global settings."""
+
+    content_purpose: ContentPurpose | None = None
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_p: float | None = Field(default=None, gt=0.0, le=1.0)
+    candidate_count: int | None = Field(default=None, ge=1, le=10)
+    maximum_context_examples: int | None = Field(default=None, ge=0, le=50)
+    maximum_example_characters: int | None = Field(default=None, ge=0, le=100000)
+
+
+class XCollectionSettings(_ConfigModel):
+    """Explicit public X source configuration."""
+
+    account: NonEmptyString | None = None
+    accounts: tuple[NonEmptyString, ...] = ()
+    queries: tuple[NonEmptyString, ...] = ()
+    post_urls: tuple[NonEmptyString, ...] = ()
+
+
+class RedditCollectionSettings(_ConfigModel):
+    """Explicit public Reddit source configuration."""
+
+    account: NonEmptyString | None = None
+    subreddits: tuple[NonEmptyString, ...] = ()
+    queries: tuple[NonEmptyString, ...] = ()
+    post_urls: tuple[NonEmptyString, ...] = ()
+    sort: Literal["hot", "new", "top"] = "top"
+    time_filter: Literal["hour", "day", "week", "month", "year", "all"] = "month"
+
+
+class ExampleCollectionSettings(_ConfigModel):
+    """Bounded browser-only collection settings."""
+
+    enabled: bool = True
+    maximum_items_per_source: int = Field(default=25, ge=1, le=500)
+    maximum_comments_per_post: int = Field(default=20, ge=0, le=200)
+    refresh_interval_hours: PositiveFloat = 24.0
+    expiry_interval_hours: PositiveFloat = 168.0
+    minimum_score: int = 5
+    include_own_content: bool = True
+    useful_window_days: PositiveInt = 90
+    x: XCollectionSettings = Field(default_factory=XCollectionSettings)
+    reddit: RedditCollectionSettings = Field(default_factory=RedditCollectionSettings)
+
+
+class AutomationSettings(_ConfigModel):
+    """Explicit capabilities for scheduled and unattended workflows."""
+
+    allow_scheduled_generation: bool = True
+    allow_unattended_approval: bool = False
+    allow_unattended_publishing: bool = False
+
+
+class SubredditContentRulesSettings(_ConfigModel):
+    """Destination-specific Reddit promotion and formatting policy."""
+
+    allow_promotional_content: bool = False
+    required_disclosures: tuple[NonEmptyString, ...] = ()
+    forbidden_phrases: tuple[NonEmptyString, ...] = ()
+    maximum_title_characters: PositiveInt | None = None
+    maximum_body_characters: PositiveInt | None = None
+
+
 class AccountSettings(_ConfigModel):
     """Configuration shared by every browser-backed account."""
 
     session_profile: NonEmptyString
     enabled: bool = True
     limits: SafetyLimitOverrides | None = None
+    identity: str | None = None
+    products: tuple[NonEmptyString, ...] = ()
+    verified_facts: tuple[NonEmptyString, ...] = ()
+    forbidden_claims: tuple[NonEmptyString, ...] = ()
+    required_disclosures: tuple[NonEmptyString, ...] = ()
 
 
 class XAccountSettings(AccountSettings):
@@ -117,6 +225,9 @@ class RedditAccountSettings(AccountSettings):
     """Configuration for one Reddit account."""
 
     allowed_subreddits: list[NonEmptyString] = Field(default_factory=list)
+    community_rules: dict[str, SubredditContentRulesSettings] = Field(
+        default_factory=dict
+    )
 
 
 class AccountsSettings(_ConfigModel):
@@ -124,6 +235,59 @@ class AccountsSettings(_ConfigModel):
 
     x: dict[NonEmptyString, XAccountSettings] = Field(default_factory=dict)
     reddit: dict[NonEmptyString, RedditAccountSettings] = Field(default_factory=dict)
+
+
+class AutopostCampaignSettings(_ConfigModel):
+    """One externally scheduled original-post campaign."""
+
+    enabled: bool = True
+    platform: Platform
+    account: NonEmptyString
+    topics: tuple[NonEmptyString, ...]
+    minimum_interval_hours: PositiveFloat
+    subreddit: NonEmptyString | None = None
+    purpose: ContentPurpose = ContentPurpose.EDUCATIONAL
+    goal: NonEmptyString | None = None
+    product_context: NonEmptyString | None = None
+    project_context: NonEmptyString | None = None
+    target_audience: NonEmptyString | None = None
+    tone: NonEmptyString | None = None
+    desired_length: NonEmptyString | None = None
+    call_to_action: NonEmptyString | None = None
+    required_facts: tuple[NonEmptyString, ...] = ()
+    forbidden_claims: tuple[NonEmptyString, ...] = ()
+    forbidden_phrases: tuple[NonEmptyString, ...] = ()
+    keywords: tuple[NonEmptyString, ...] = ()
+    additional_instructions: NonEmptyString | None = None
+    candidate_count: int | None = Field(default=None, ge=1, le=10)
+    profile_name: NonEmptyString | None = None
+
+    @field_validator("topics")
+    @classmethod
+    def validate_topics(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value:
+            raise ValueError("topics must contain at least one topic")
+        normalized = [item.casefold() for item in value]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("topics must be unique ignoring case")
+        return value
+
+    @field_validator("purpose", mode="before")
+    @classmethod
+    def normalize_purpose(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().casefold().replace("-", "_")
+        return value
+
+    @model_validator(mode="after")
+    def validate_destination(self) -> Self:
+        if self.platform is Platform.X and self.subreddit is not None:
+            raise ValueError("an X campaign cannot configure subreddit")
+        if self.platform is Platform.REDDIT and self.subreddit is None:
+            raise ValueError("a Reddit campaign requires subreddit")
+        return self
+
+
 
 
 class Settings(BaseSettings):
@@ -139,6 +303,19 @@ class Settings(BaseSettings):
     browser: BrowserSettings = Field(default_factory=BrowserSettings)
     limits: SafetyLimits = Field(default_factory=SafetyLimits)
     accounts: AccountsSettings = Field(default_factory=AccountsSettings)
+    content_generation: ContentGenerationSettings = Field(
+        default_factory=ContentGenerationSettings
+    )
+    generation_profiles: dict[GenerationType, GenerationProfileSettings] = Field(
+        default_factory=dict
+    )
+    example_collection: ExampleCollectionSettings = Field(
+        default_factory=ExampleCollectionSettings
+    )
+    automation: AutomationSettings = Field(default_factory=AutomationSettings)
+    autopost_campaigns: dict[NonEmptyString, AutopostCampaignSettings] = Field(
+        default_factory=dict
+    )
 
     model_config = SettingsConfigDict(
         env_prefix="STEALTH_BOT_",
@@ -213,6 +390,107 @@ class Settings(BaseSettings):
                 owners[profile_key] = owner
         return self
 
+    @model_validator(mode="after")
+    def validate_generation_and_collection_accounts(self) -> Self:
+        if not self.manual_approval and not self.automation.allow_unattended_approval:
+            raise ValueError(
+                "manual_approval=false requires automation.allow_unattended_approval=true"
+            )
+
+        reddit_accounts = self.accounts.reddit
+        for account_name, account in reddit_accounts.items():
+            allowed = {item.casefold() for item in account.allowed_subreddits}
+            invalid_rules = sorted(
+                subreddit
+                for subreddit in account.community_rules
+                if subreddit.casefold() not in allowed
+            )
+            if invalid_rules:
+                raise ValueError(
+                    f"accounts.reddit.{account_name}.community_rules keys must be "
+                    "included in allowed_subreddits: "
+                    + ", ".join(invalid_rules)
+                )
+
+        collection_x_account = self.example_collection.x.account
+        if collection_x_account is not None:
+            account = self.accounts.x.get(collection_x_account)
+            if account is None or not account.enabled:
+                raise ValueError(
+                    "example_collection.x.account must name an enabled X account"
+                )
+
+        collection_reddit_account = self.example_collection.reddit.account
+        if collection_reddit_account is not None:
+            account = self.accounts.reddit.get(collection_reddit_account)
+            if account is None or not account.enabled:
+                raise ValueError(
+                    "example_collection.reddit.account must name an enabled Reddit account"
+                )
+            allowed = {item.casefold() for item in account.allowed_subreddits}
+            missing = [
+                subreddit
+                for subreddit in self.example_collection.reddit.subreddits
+                if subreddit.casefold() not in allowed
+            ]
+            if missing:
+                raise ValueError(
+                    "configured Reddit collection subreddits are not allowlisted: "
+                    + ", ".join(missing)
+                )
+        return self
+
+    @model_validator(mode="after")
+    def validate_autopost_campaigns(self) -> Self:
+        for campaign_id, campaign in self.autopost_campaigns.items():
+            if not _AUTOPOST_CAMPAIGN_ID.fullmatch(campaign_id):
+                raise ValueError(
+                    f"autopost campaign identifier {campaign_id!r} is not systemd-safe"
+                )
+
+            accounts = (
+                self.accounts.x
+                if campaign.platform is Platform.X
+                else self.accounts.reddit
+            )
+            account = accounts.get(campaign.account)
+            if account is None or not account.enabled:
+                platform_name = "X" if campaign.platform is Platform.X else "Reddit"
+                raise ValueError(
+                    f"autopost campaign {campaign_id!r} requires an enabled "
+                    f"{platform_name} account named {campaign.account!r}"
+                )
+
+            if campaign.platform is Platform.REDDIT:
+                allowed = {
+                    subreddit.casefold() for subreddit in account.allowed_subreddits
+                }
+                if campaign.subreddit is None:
+                    raise ValueError(
+                        f"autopost campaign {campaign_id!r} requires a Reddit subreddit"
+                    )
+                if campaign.subreddit.casefold() not in allowed:
+                    raise ValueError(
+                        f"autopost campaign {campaign_id!r} subreddit "
+                        f"{campaign.subreddit!r} is not allowlisted"
+                    )
+                rule = next(
+                    (
+                        value
+                        for name, value in account.community_rules.items()
+                        if campaign.subreddit is not None
+                        and name.casefold() == campaign.subreddit.casefold()
+                    ),
+                    None,
+                )
+                if campaign.purpose is ContentPurpose.PROMOTIONAL and (
+                    rule is None or not rule.allow_promotional_content
+                ):
+                    raise ValueError(
+                        f"autopost campaign {campaign_id!r} requires explicit "
+                        "promotional Reddit permission"
+                    )
+        return self
 
 def load_settings(config_path: str | Path | None = None) -> Settings:
     """Load JSON or YAML settings, then apply dotenv and environment overrides.
@@ -236,10 +514,11 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         source_description = str(resolved_config_path)
 
     try:
-        settings = Settings(
-            _env_file=base_directory / ".env",
+        settings_values: dict[str, Any] = {
+            "_env_file": base_directory / ".env",
             **file_values,
-        )
+        }
+        settings = Settings(**settings_values)
     except ValidationError as error:
         raise ConfigurationError(
             _format_validation_error(error, source_description)
@@ -302,16 +581,20 @@ def _read_config_file(config_path: Path) -> dict[str, Any]:
             f"Invalid JSON in {config_path} at line {error.lineno}, "
             f"column {error.colno}: {error.msg}"
         ) from error
-    except yaml.YAMLError as error:
+    except MarkedYAMLError as error:
         location = ""
         if error.problem_mark is not None:
             location = (
                 f" at line {error.problem_mark.line + 1}, "
                 f"column {error.problem_mark.column + 1}"
             )
-        problem = getattr(error, "problem", None) or "could not parse YAML"
+        problem = error.problem or "could not parse YAML"
         raise ConfigurationError(
             f"Invalid YAML in {config_path}{location}: {problem}"
+        ) from error
+    except yaml.YAMLError as error:
+        raise ConfigurationError(
+            f"Invalid YAML in {config_path}: could not parse YAML"
         ) from error
 
     if parsed is None:
@@ -357,16 +640,24 @@ def _format_validation_error(
 
 __all__ = [
     "AccountSettings",
+    "AutopostCampaignSettings",
     "AccountsSettings",
+    "AutomationSettings",
     "BrowserSettings",
     "CONFIG_PATH_ENVIRONMENT_VARIABLE",
     "ConfigurationError",
+    "ContentGenerationSettings",
+    "ExampleCollectionSettings",
+    "GenerationProfileSettings",
     "PlatformLimitOverrides",
     "RandomizedDelaySettings",
     "RedditAccountSettings",
+    "RedditCollectionSettings",
     "SafetyLimitOverrides",
     "SafetyLimits",
     "Settings",
+    "SubredditContentRulesSettings",
+    "XCollectionSettings",
     "XAccountSettings",
     "load_settings",
 ]

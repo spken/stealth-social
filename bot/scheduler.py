@@ -38,6 +38,11 @@ class RandomSource(Protocol):
         ...
 
 
+class ApprovedGeneratedActionLookup(Protocol):
+    async def has_approved_candidate_for_action(self, action_id: UUID) -> bool:
+        raise NotImplementedError
+
+
 @dataclass(frozen=True, slots=True)
 class SchedulePreview:
     """Non-persistent view of the lifecycle and time a schedule request would use."""
@@ -93,12 +98,14 @@ class SchedulerService:
         worker: Worker | None = None,
         random_source: RandomSource | None = None,
         clock: Callable[[], datetime] | None = None,
+        approved_generated_action_lookup: ApprovedGeneratedActionLookup | None = None,
     ) -> None:
         self._settings = settings
         self._actions = action_repository
         self._worker = worker
         self._random = random_source or SystemRandom()
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._approved_generated_action_lookup = approved_generated_action_lookup
         self._log = logger.bind(component="scheduler")
 
     @property
@@ -376,6 +383,22 @@ class SchedulerService:
         when, _ = self._schedule_time(scheduled_at)
 
         if self._settings.manual_approval:
+            if (
+                action.status is ActionStatus.DRAFT
+                and self._approved_generated_action_lookup is not None
+                and await self._approved_generated_action_lookup.has_approved_candidate_for_action(
+                    action.id
+                )
+            ):
+                scheduled = await self._actions.schedule(action.id, when)
+                self._log.info(
+                    "generated_action_scheduled",
+                    action_id=str(scheduled.id),
+                    platform=scheduled.platform.value,
+                    account_name=scheduled.account_name,
+                    scheduled_at=when.isoformat(),
+                )
+                return scheduled
             if action.status is not ActionStatus.PENDING_APPROVAL:
                 raise InvalidStateTransitionError(
                     "manual approval is enabled; only pending-approval actions can "
@@ -573,6 +596,7 @@ def _safe_exception_message(error: Exception) -> str:
 __all__ = [
     "ImportFailure",
     "ImportReport",
+    "ApprovedGeneratedActionLookup",
     "RandomSource",
     "SchedulePreview",
     "SchedulerService",

@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily X autopost timer
+
+[Timer]
+OnCalendar=*-*-* 09:00:00
+Persistent=true
+Unit=stealth-autopost@daily-x.service
+
+[Install]
+WantedBy=timers.target

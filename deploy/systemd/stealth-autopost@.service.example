@@ -1,0 +1,17 @@
+[Unit]
+Description=Stealth Social autopost campaign %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/stealth-social
+Environment=STEALTH_BOT_CONFIG=%h/stealth-social/config.json
+ExecStart=%h/stealth-social/.venv/bin/social-bot autopost %i
+Restart=on-failure
+RestartPreventExitStatus=2 3
+RestartSec=5min
+TimeoutStartSec=75min
+
+[Install]
+WantedBy=default.target
